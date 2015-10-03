@@ -35,6 +35,8 @@
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <libnautilus-private/nautilus-file-utilities.h>
+#include <libnautilus-private/nautilus-canvas-dnd.h>
+#include <src/nautilus-list-view.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -381,10 +383,52 @@ source_is_deletable (GFile *file)
 	return ret;
 }
 
+NautilusDragInfo *
+nautilus_drag_get_source_data (GdkDragContext *context,
+                               guint32         time)
+{
+        GtkWidget *source_widget;
+        NautilusDragInfo *source_data;
+
+        source_widget = gtk_drag_get_source_widget (context);
+        if (source_widget == NULL)
+                return NULL;
+
+        if (NAUTILUS_IS_CANVAS_CONTAINER (source_widget)) {
+               source_data = nautilus_canvas_container_get_drag_source_data (NAUTILUS_CANVAS_CONTAINER (source_widget),
+                                                                             context,
+                                                                             time);
+        } else if (GTK_IS_TREE_VIEW (source_widget)) {
+                NautilusWindow *window;
+                NautilusWindowSlot *active_slot;
+                NautilusView *view;
+
+                window = NAUTILUS_WINDOW (gtk_widget_get_toplevel (source_widget));
+                active_slot = nautilus_window_get_active_slot (window);
+                view = nautilus_window_slot_get_current_view (active_slot);
+                if (NAUTILUS_IS_LIST_VIEW (view)) {
+                        source_data = nautilus_list_view_get_drag_source_data (NAUTILUS_LIST_VIEW (view),
+                                                                               context,
+                                                                               time);
+                } else {
+                        g_warning ("Got a drag context with a tree view source widget, but current view is not list view");
+                        source_data = NULL;
+                }
+        } else {
+                /* it's a slot or something else */
+                g_warning ("Requested drag source data from a widget that doesn't support it");
+                source_data = NULL;
+        }
+
+        return source_data;
+}
+
 void
 nautilus_drag_default_drop_action_for_icons (GdkDragContext *context,
-					     const char *target_uri_string, const GList *items,
-					     int *action)
+                                             const char     *target_uri_string,
+                                             const GList    *items,
+                                             guint32         overrided_actions,
+                                             int            *action)
 {
 	gboolean same_fs;
 	gboolean target_is_source_parent;
@@ -399,7 +443,10 @@ nautilus_drag_default_drop_action_for_icons (GdkDragContext *context,
 		return;
 	}
 
-	actions = gdk_drag_context_get_actions (context) & (GDK_ACTION_MOVE | GDK_ACTION_COPY);
+        if (overrided_actions)
+                actions = overrided_actions & (GDK_ACTION_MOVE | GDK_ACTION_COPY);
+        else
+	        actions = gdk_drag_context_get_actions (context) & (GDK_ACTION_MOVE | GDK_ACTION_COPY);
 	if (actions == 0) {
 		 /* We can't use copy or move, just go with the suggested action. */
 		*action = gdk_drag_context_get_suggested_action (context);

@@ -54,4 +54,9 @@ typedef struct {
 GType nautilus_list_view_get_type (void);
 NautilusFilesView * nautilus_list_view_new (NautilusWindowSlot *slot);
 
+NautilusDragInfo *
+nautilus_list_view_get_drag_source_data (NautilusListView *list_view,
+                                         GdkDragContext   *context,
+                                         guint32           time);
+
 #endif /* NAUTILUS_LIST_VIEW_H */

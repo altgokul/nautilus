@@ -97,6 +97,7 @@ struct NautilusListViewDetails {
 	gboolean ignore_button_release;
 	gboolean row_selected_on_button_down;
 	gboolean active;
+        NautilusDragInfo *drag_source_info;
 	
 	GHashTable *columns;
 	GtkWidget *column_editor;
@@ -342,31 +343,58 @@ nautilus_list_view_did_not_drag (NautilusListView *view,
 	
 }
 
-static void 
-drag_data_get_callback (GtkWidget *widget,
-			GdkDragContext *context,
-			GtkSelectionData *selection_data,
-			guint info,
-			guint time)
+NautilusDragInfo *
+nautilus_list_view_get_drag_source_data (NautilusListView *list_view,
+                                         GdkDragContext   *context,
+                                         guint32           time)
 {
 	GtkTreeView *tree_view;
 	GtkTreeModel *model;
-	GList *selection_cache;
+
+	tree_view = GTK_TREE_VIEW (list_view->details->tree_view);
+
+	model = gtk_tree_view_get_model (tree_view);
+
+	if (model == NULL) {
+		return NULL;
+	}
+
+	if (list_view->details->drag_source_info == NULL ||
+            list_view->details->drag_source_info->selection_cache == NULL) {
+		return NULL;
+	}
+
+        return list_view->details->drag_source_info;
+}
+
+static void
+drag_data_get_callback (GtkWidget        *widget,
+                        GdkDragContext   *context,
+                        GtkSelectionData *selection_data,
+                        guint             info,
+                        guint             time,
+                        gpointer          user_data)
+{
+	GtkTreeView *tree_view;
+	GtkTreeModel *model;
+        NautilusListView *list_view;
 
 	tree_view = GTK_TREE_VIEW (widget);
-  
+        list_view = NAUTILUS_LIST_VIEW (user_data);
+
 	model = gtk_tree_view_get_model (tree_view);
   
 	if (model == NULL) {
 		return;
 	}
 
-	selection_cache = g_object_get_data (G_OBJECT (context), "drag-info");
-	if (selection_cache == NULL) {
+	if (list_view->details->drag_source_info == NULL ||
+            list_view->details->drag_source_info->selection_cache == NULL) {
 		return;
 	}
 
-	nautilus_drag_drag_data_get_from_cache (selection_cache, context, selection_data, info, time);
+	nautilus_drag_drag_data_get_from_cache (list_view->details->drag_source_info->selection_cache,
+                                                context, selection_data, info, time);
 }
 
 static void
@@ -479,14 +507,31 @@ each_item_get_data_binder (NautilusDragEachSelectedItemDataGet iteratee,
 	gtk_tree_selection_selected_foreach (selection, item_get_data_binder, &context);
 }
 
+static void
+drag_end_callback (GtkWidget        *widget,
+                   GdkDragContext   *context,
+                   NautilusListView *view)
+{
+        NautilusWindow *window;
+
+        window = nautilus_files_view_get_window (NAUTILUS_FILES_VIEW (view));
+
+        nautilus_window_end_dnd (window, context);
+
+	nautilus_drag_destroy_selection_list (view->details->drag_source_info->selection_cache);
+	view->details->drag_source_info->selection_cache = NULL;
+}
 
 static void
 drag_begin_callback (GtkWidget *widget,
 		     GdkDragContext *context,
 		     NautilusListView *view)
 {
-	GList *selection_cache;
 	cairo_surface_t *surface;
+        GdkDragAction actions;
+        NautilusWindow *window;
+
+        window = nautilus_files_view_get_window (NAUTILUS_FILES_VIEW (view));
 
 	surface = get_drag_surface (view);
 	if (surface) {
@@ -499,13 +544,10 @@ drag_begin_callback (GtkWidget *widget,
 	stop_drag_check (view);
 	view->details->drag_started = TRUE;
 
-	selection_cache = nautilus_drag_create_selection_cache (view,
-								each_item_get_data_binder);
-
-	g_object_set_data_full (G_OBJECT (context),
-				"drag-info",
-				selection_cache,
-				(GDestroyNotify)nautilus_drag_destroy_selection_list);
+        /* Source selection */
+        view->details->drag_source_info->selection_cache = nautilus_drag_create_selection_cache (view,
+                                                                                                 each_item_get_data_binder);
+        nautilus_window_start_dnd (window, context);
 }
 
 static gboolean
@@ -553,10 +595,14 @@ motion_notify_callback (GtkWidget *widget,
 					      view->details->drag_y,
 					      event->x, 
 					      event->y)) {
+                        guint32 actions;
+
+                        actions = GDK_ACTION_MOVE | GDK_ACTION_COPY | GDK_ACTION_LINK | GDK_ACTION_ASK;
+                        view->details->drag_source_info->overrided_actions = actions;
 			gtk_drag_begin
 				(widget,
 				 source_target_list,
-				 GDK_ACTION_MOVE | GDK_ACTION_COPY | GDK_ACTION_LINK | GDK_ACTION_ASK,
+				 actions,
 				 view->details->drag_button,
 				 (GdkEvent*)event);
 		}		      
@@ -1851,6 +1897,8 @@ create_and_set_up_tree_view (NautilusListView *view)
 
 	g_signal_connect_object (view->details->tree_view, "drag-begin",
 				 G_CALLBACK (drag_begin_callback), view, 0);
+	g_signal_connect_object (view->details->tree_view, "drag-end",
+				 G_CALLBACK (drag_end_callback), view, 0);
 	g_signal_connect_object (view->details->tree_view, "drag-data-get",
 				 G_CALLBACK (drag_data_get_callback), view, 0);
 	g_signal_connect_object (view->details->tree_view, "motion-notify-event",
@@ -3174,6 +3222,11 @@ nautilus_list_view_finalize (GObject *object)
 
 	g_free (list_view->details);
 
+	nautilus_drag_destroy_selection_list (list_view->details->drag_source_info->selection_cache);
+	list_view->details->drag_source_info->selection_cache = NULL;
+        g_free (list_view->details->drag_source_info);
+
+
 	g_signal_handlers_disconnect_by_func (nautilus_preferences,
 					      default_sort_order_changed_callback,
 					      list_view);
@@ -3426,6 +3479,8 @@ nautilus_list_view_init (NautilusListView *list_view)
 		g_signal_connect (nautilus_clipboard_monitor_get (),
 		                  "clipboard-info",
 		                  G_CALLBACK (list_view_notify_clipboard_info), list_view);
+
+	list_view->details->drag_source_info = g_new0 (NautilusDragInfo, 1);
 
 	view_action_group = nautilus_files_view_get_action_group (NAUTILUS_FILES_VIEW (list_view));
 	g_action_map_add_action_entries (G_ACTION_MAP (view_action_group),
